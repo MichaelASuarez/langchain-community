@@ -550,12 +550,11 @@ class Yellowbrick(VectorStore):
         from psycopg2.extras import execute_values
 
         index_params = kwargs.get("index_params") or Yellowbrick.IndexParams()
-        whereClause = "1=1"
-        if kwargs.get("filter") is not None:
-            filter_value = kwargs.get("filter")
-            if filter_value is not None:
-                jsFilter = json.loads(filter_value)
-                whereClause = jsonFilter2sqlWhere(jsFilter, "v3.metadata")
+        where_clause = "1=1"
+        filter_value = kwargs.get("filter")
+        if filter_value is not None:
+            filter_dict = json.loads(filter_value)
+            where_clause = jsonFilter2sqlWhere(filter_dict, "v3.metadata")
 
         with self.connection.get_cursor() as cursor:
             tmp_embeddings_table = "tmp_" + self._table
@@ -629,7 +628,7 @@ class Yellowbrick(VectorStore):
                     INNER JOIN
                         index_docs v4
                     ON v2.doc_id = v4.doc_id
-                    where {whereClause}
+                    where {where_clause}
                     GROUP BY v3.doc_id, v3.text, v3.metadata
                     ORDER BY score DESC
                     LIMIT %s
@@ -640,7 +639,7 @@ class Yellowbrick(VectorStore):
                     content_table=content_table,
                     lsh_index=lsh_index,
                     input_hash_table=input_hash_table,
-                    whereClause=sql.SQL(whereClause),
+                    where_clause=sql.SQL(where_clause),
                     hamming_distance=sql.Literal(
                         index_params.get_param("hamming_distance", 0)
                     ),
@@ -681,48 +680,6 @@ class Yellowbrick(VectorStore):
                     tmp_embedding = tmp_quantized_embedding_sql
                 else:
                     tmp_embedding = tmp_embedding_sql
-
-                '''
-                centroid_id = sql.Literal(
-                    self._find_centroid(cursor, "tmp_" + self._table)
-                )
-                sql_query = sql.SQL(
-                    """
-                    SELECT
-                        text,
-                        metadata,
-                        score
-                    FROM
-                        (SELECT
-                            v5.doc_id doc_id,
-                            SUM(v1.embedding * v5.embedding) /
-                            (SQRT(SUM(v1.embedding * v1.embedding)) *
-                            SQRT(SUM(v5.embedding * v5.embedding))) AS score
-                        FROM
-                            {tmp_embedding} v1
-                        INNER JOIN
-                            {ivf_index_table} v5
-                        ON v1.embedding_id = v5.embedding_id
-                        WHERE v5.id = {centroid_id}
-                        GROUP BY v5.doc_id
-                        ORDER BY score DESC LIMIT %s
-                        ) v4
-                    INNER JOIN
-                        {content_table} v3
-                    ON v4.doc_id = v3.doc_id
-                    where {whereClause}
-                    ORDER BY score DESC
-                """
-                ).format(
-                    content_table=content_table,
-                    ivf_index_table=ivf_index_table,
-                    centroid_id=centroid_id,
-                    tmp_embedding=tmp_embedding,
-                    whereClause=sql.SQL(whereClause)
-                )
-                cursor.execute(sql_query, (k,))
-                results = cursor.fetchall()
-                '''
 
                 centroid_sql = sql.SQL(
                     """
@@ -785,7 +742,7 @@ class Yellowbrick(VectorStore):
                     INNER JOIN
                         {content_table} v3
                     ON v4.doc_id = v3.doc_id
-                    where {whereClause}
+                    where {where_clause}
                     ORDER BY score DESC
                     LIMIT %s
                 """
@@ -794,7 +751,7 @@ class Yellowbrick(VectorStore):
                     content_table=content_table,
                     ivf_index_table=ivf_index_table,
                     tmp_embedding=tmp_embedding,
-                    whereClause=sql.SQL(whereClause),
+                    where_clause=sql.SQL(where_clause),
                 )
                 cursor.execute(sql_query, (k,))
                 results = cursor.fetchall()
@@ -823,7 +780,7 @@ class Yellowbrick(VectorStore):
                     INNER JOIN
                         {content_table} v3
                     ON v4.doc_id = v3.doc_id
-                    where {whereClause}
+                    where {where_clause}
                     ORDER BY score DESC
                     LIMIT %s
                 """
@@ -831,7 +788,7 @@ class Yellowbrick(VectorStore):
                     tmp_embeddings_table=sql.Identifier(tmp_embeddings_table),
                     embeddings_table=embeddings_table,
                     content_table=content_table,
-                    whereClause=sql.SQL(whereClause),
+                    where_clause=sql.SQL(where_clause),
                 )
                 cursor.execute(sql_query, (k,))
                 results = cursor.fetchall()
@@ -1767,7 +1724,16 @@ def jsonFilter2sqlWhere(
 
 
 def _process_filter_dict(filter_dict: Dict[str, Any], metadata_column: str) -> str:
-    """Process a filter dictionary and return SQL WHERE clause."""
+    """Process a filter dictionary and return SQL WHERE clause.
+
+    Args:
+        filter_dict: Dictionary containing filter conditions with operators
+            like $and, $or, or field-specific conditions.
+        metadata_column: Name of the JSONB column containing metadata.
+
+    Returns:
+        SQL WHERE clause string with proper parentheses and logical operators.
+    """
     conditions = []
 
     for key, value in filter_dict.items():
@@ -1798,7 +1764,17 @@ def _process_filter_dict(filter_dict: Dict[str, Any], metadata_column: str) -> s
 def _process_field_condition(
     field_name: str, condition: Any, metadata_column: str
 ) -> str:
-    """Process a single field condition."""
+    """Process a single field condition.
+
+    Args:
+        field_name: Name of the metadata field to filter on.
+        condition: Filter condition which can be a simple value (for equality)
+            or a dictionary with operators like $eq, $gt, etc.
+        metadata_column: Name of the JSONB column containing metadata.
+
+    Returns:
+        SQL condition string for the specified field.
+    """
 
     # Handle simple equality (shorthand syntax)
     if not isinstance(condition, dict):
@@ -1822,7 +1798,20 @@ def _process_field_condition(
 def _create_json_condition(
     field_name: str, operator: str, value: Any, metadata_column: str
 ) -> str:
-    """Create a single JSON condition using Yellowbrick JSON path syntax."""
+    """Create a single JSON condition using Yellowbrick JSON path syntax.
+
+    Args:
+        field_name: Name of the metadata field to filter on.
+        operator: Filter operator such as $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists.
+        value: Value to compare against. Type varies based on operator.
+        metadata_column: Name of the JSONB column containing metadata.
+
+    Returns:
+        SQL condition string using Yellowbrick JSON path syntax.
+
+    Raises:
+        ValueError: If operator is unsupported or value type is incompatible with operator.
+    """
 
     # Escape field name for JSON path if it contains special characters
     escaped_field = _escape_json_field_name(field_name)
@@ -1881,9 +1870,18 @@ def _create_json_condition(
 
 
 def _escape_json_field_name(field_name: str) -> str:
-    """
-    Escape field names for JSON path expressions in Yellowbrick.
-    Uses bracket notation for fields with special characters.
+    """Escape field names for JSON path expressions in Yellowbrick.
+
+    Uses bracket notation for fields with special characters to ensure
+    proper JSON path parsing.
+
+    Args:
+        field_name: The raw field name that may contain special characters.
+
+    Returns:
+        Escaped field name suitable for use in JSON path expressions.
+        Uses bracket notation with quotes for fields containing special characters,
+        or dot notation for simple field names.
     """
     # Check if field name contains special characters that need bracket notation
     special_chars = [
@@ -1915,7 +1913,14 @@ def _escape_json_field_name(field_name: str) -> str:
 
 
 def _get_cast_type(value: Any) -> str:
-    """Determine the appropriate SQL cast type based on Python value type."""
+    """Determine the appropriate SQL cast type based on Python value type.
+
+    Args:
+        value: Python value whose type will determine the SQL cast type.
+
+    Returns:
+        SQL cast type string such as 'INTEGER', 'DOUBLE PRECISION', 'BOOLEAN', or 'TEXT'.
+    """
     if isinstance(value, int):
         return "INTEGER"
     elif isinstance(value, float):
@@ -1929,7 +1934,17 @@ def _get_cast_type(value: Any) -> str:
 
 
 def _format_sql_value(value: Any) -> str:
-    """Format a Python value for SQL."""
+    """Format a Python value for SQL.
+
+    Args:
+        value: Python value to be formatted for SQL query inclusion.
+            Can be None, bool, int, float, str, or other types.
+
+    Returns:
+        Properly formatted and escaped SQL value string.
+        None becomes 'NULL', booleans become 'true'/'false',
+        numbers are converted to strings, and strings are quoted and escaped.
+    """
     if value is None:
         return "NULL"
     elif isinstance(value, bool):

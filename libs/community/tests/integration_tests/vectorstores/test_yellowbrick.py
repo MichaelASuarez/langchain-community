@@ -373,25 +373,128 @@ def test_yellowbrick_add_text_filter() -> None:
         _yellowbrick_vector_from_texts_no_schema(),
     ]
     for docsearch in docsearches:
-        # Add a new text with metadata that we'll filter on
-        texts = ["unique-filter-text"]
-        metadatas = [{"category": "special"}]
+        # Add texts with various metadata for testing different filters
+        texts = [
+            "unique-filter-text-1",
+            "unique-filter-text-2",
+            "unique-filter-text-3",
+            "unique-filter-text-4",
+            "unique-filter-text-5",
+        ]
+        metadatas = [
+            {"category": "special", "priority": 1, "tags": ["important", "urgent"]},
+            {"category": "normal", "priority": 2, "tags": ["important"]},
+            {"category": "special", "priority": 3, "active": True},
+            {"category": "normal", "priority": 4, "active": False},
+            {"category": "archived", "tags": ["old"]},
+        ]
         added_ids = docsearch.add_texts(texts, metadatas)
 
-        # Search without filter should find the text
-        output = docsearch.similarity_search("unique-filter-text", k=1)
-        assert Document(
-            page_content="unique-filter-text", metadata={}
-        ) in output or any(d.page_content == "unique-filter-text" for d in output)
-
-        # Search with filter should find by metadata
-        js_filter = {"category": {"$eq": "special"}}
-        output_filtered = docsearch.similarity_search(
-            "unique-filter-text", k=1, filter=json.dumps(js_filter)
+        # Basic search without filter
+        output = docsearch.similarity_search("unique-filter-text", k=5)
+        assert len(output) == 5
+        
+        # Test $eq operator
+        eq_filter = {"category": {"$eq": "special"}}
+        output_eq = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(eq_filter)
         )
-        # Ensure the filtered result contains the text we added
-        assert any(d.page_content == "unique-filter-text" for d in output_filtered)
-
+        assert len(output_eq) == 2
+        assert all(d.page_content.startswith("unique-filter-text") for d in output_eq)
+        assert all(
+            i in [1, 3] for i in [int(d.page_content[-1]) for d in output_eq]
+        )
+        
+        # Test $ne operator
+        ne_filter = {"category": {"$ne": "special"}}
+        output_ne = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(ne_filter)
+        )
+        assert len(output_ne) == 3
+        assert all(
+            i in [2, 4, 5] for i in [int(d.page_content[-1]) for d in output_ne]
+        )
+        
+        # Test $gt operator
+        gt_filter = {"priority": {"$gt": 2}}
+        output_gt = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(gt_filter)
+        )
+        assert len(output_gt) == 2
+        assert all(
+            i in [3, 4] for i in [int(d.page_content[-1]) for d in output_gt]
+        )
+        
+        # Test $in operator
+        in_filter = {"category": {"$in": ["special", "archived"]}}
+        output_in = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(in_filter)
+        )
+        assert len(output_in) == 3
+        assert all(
+            i in [1, 3, 5] for i in [int(d.page_content[-1]) for d in output_in]
+        )
+        
+        # Test $nin operator
+        nin_filter = {"category": {"$nin": ["normal"]}}
+        output_nin = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(nin_filter)
+        )
+        assert len(output_nin) == 3
+        assert all(
+            i in [1, 3, 5] for i in [int(d.page_content[-1]) for d in output_nin]
+        )
+        
+        # Test $exists operator
+        exists_filter = {"active": {"$exists": True}}
+        output_exists = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(exists_filter)
+        )
+        assert len(output_exists) == 2
+        assert all(
+            i in [3, 4] for i in [int(d.page_content[-1]) for d in output_exists]
+        )
+        
+        # Test $and operator
+        and_filter = {"$and": [{"category": "special"}, {"priority": {"$lt": 3}}]}
+        output_and = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(and_filter)
+        )
+        assert len(output_and) == 1
+        assert output_and[0].page_content == "unique-filter-text-1"
+        
+        # Test $or operator
+        or_filter = {"$or": [{"category": "archived"}, {"priority": 1}]}
+        output_or = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(or_filter)
+        )
+        assert len(output_or) == 2
+        assert all(
+            i in [1, 5] for i in [int(d.page_content[-1]) for d in output_or]
+        )
+        
+        # Test nested complex filter
+        complex_filter = {
+            "$and": [
+                {"$or": [{"category": "special"}, {"category": "normal"}]},
+                {"$or": [{"priority": {"$lt": 3}}, {"active": True}]}
+            ]
+        }
+        output_complex = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(complex_filter)
+        )
+        assert len(output_complex) == 3
+        assert all(
+            i in [1, 2, 3] for i in [int(d.page_content[-1]) for d in output_complex]
+        )
+        
+        # Test empty filter (should be equivalent to no filter)
+        empty_filter = {}
+        output_empty = docsearch.similarity_search(
+            "unique-filter-text", k=5, filter=json.dumps(empty_filter)
+        )
+        assert len(output_empty) == 5
+        
         # Clean up
         docsearch.delete(added_ids)
         docsearch.drop(table=YELLOWBRICK_TABLE, schema=docsearch._schema)
